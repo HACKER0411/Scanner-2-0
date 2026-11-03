@@ -67,7 +67,7 @@ td,th{text-align:left;padding:9px 6px;border-bottom:1px solid #29364a;white-spac
 <b>Signal rules</b>
 <p class="muted">BUY: lower wick &gt; upper wick, then upper &gt; lower, then lower &gt; upper. Trigger: live price crosses above candle 3 high. Stop reference: candle 1 low.</p>
 <p class="muted">SELL: upper wick &gt; lower wick, then lower &gt; upper, then upper &gt; lower. Trigger: live price crosses below candle 3 low. Stop reference: candle 1 high.</p>
-<p class="notice">Experimental scanner. Candles are built from ticks collected after scanning starts. Higher timeframes need time to build. Tick-built candles may differ from MT5 candles. Keep Chrome open and verify every setup on MT5 demo before considering live trading.</p>
+<p class="notice">This experimental browser scanner starts collecting ticks when you press Start. It does not backfill earlier candles. Higher timeframes may take many hours to become eligible. Tick-built candles may differ from MT5 candles. Keep Chrome open and active. Verify every setup on MT5 demo before considering live trading.</p>
 </div>
 <div class="muted">No orders are placed. No Deriv password or API token is requested. Reloading the page clears collected data.</div>
 </main>
@@ -80,13 +80,7 @@ const ENDPOINT='wss://ws.derivws.com/websockets/v3?app_id=1089';
 
 const TF=[60,120,180,240,300,360,600,720,900,1200,1800,3600,7200,10800,14400,21600,28800,43200];
 
-const LABEL={
-60:'M1',120:'M2',180:'M3',240:'M4',300:'M5',
-360:'M6',600:'M10',720:'M12',900:'M15',
-1200:'M20',1800:'M30',3600:'H1',7200:'H2',
-10800:'H3',14400:'H4',21600:'H6',
-28800:'H8',43200:'H12'
-};
+const LABEL={60:'M1',120:'M2',180:'M3',240:'M4',300:'M5',360:'M6',600:'M10',720:'M12',900:'M15',1200:'M20',1800:'M30',3600:'H1',7200:'H2',10800:'H3',14400:'H4',21600:'H6',28800:'H8',43200:'H12'};
 
 const $=id=>document.getElementById(id);
 
@@ -106,9 +100,7 @@ let seen=new Set();
 let previous=new Map();
 let subscribeTimer=null;
 
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({
-'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-}[c]));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const fmt=n=>Number(n).toLocaleString(undefined,{maximumFractionDigits:8});
 
@@ -124,13 +116,7 @@ const k=Math.floor(t.time/sec)*sec;
 let b=map.get(k);
 
 if(!b){
-map.set(k,b={
-time:k,
-open:t.price,
-high:t.price,
-low:t.price,
-close:t.price
-});
+map.set(k,b={time:k,open:t.price,high:t.price,low:t.price,close:t.price});
 }else{
 b.high=Math.max(b.high,t.price);
 b.low=Math.min(b.low,t.price);
@@ -156,7 +142,6 @@ const arr=ticks.get(sym);
 if(!arr||arr.length<2)return;
 
 for(const sec of TF){
-
 const bars=candleBars(arr,sec,epoch);
 if(bars.length<3)continue;
 
@@ -288,7 +273,6 @@ setStatus('Connected. Requesting active instruments…');
 
 ws.send(JSON.stringify({
 active_symbols:'brief',
-product_type:'basic',
 req_id:1
 }));
 };
@@ -309,19 +293,24 @@ return;
 
 if(m.msg_type==='active_symbols'){
 
-symbols=(m.active_symbols||[]).filter(x=>x.symbol);
+symbols=(m.active_symbols||[])
+.map(x=>({
+...x,
+symbol:x.symbol||x.underlying_symbol,
+display_name:x.display_name||x.underlying_symbol_name||x.underlying_symbol||x.symbol
+}))
+.filter(x=>x.symbol);
 
 $('symbols').textContent=symbols.length;
 
 if(!symbols.length){
-setStatus('No active instruments returned by Deriv.');
+setStatus('Deriv returned an empty active-symbol list. Check the API response or try again later.');
 return;
 }
 
 let index=0;
 
 subscribeTimer=setInterval(()=>{
-
 if(!running||!ws||ws.readyState!==1){
 clearInterval(subscribeTimer);
 return;
@@ -338,28 +327,25 @@ subscribe:1
 
 index+=5;
 
-setStatus(`Subscribing: ${Math.min(index,symbols.length)} / ${symbols.length}`);
+setStatus(`Subscribing to instruments: ${Math.min(index,symbols.length)} / ${symbols.length}`);
 
 if(index>=symbols.length){
 clearInterval(subscribeTimer);
 subscribeTimer=null;
-setStatus(`Subscribed to ${symbols.length} instruments. Collecting ticks.`);
+setStatus(`Subscribed to ${symbols.length} instruments. Collecting ticks; candles build from now onward.`);
 }
-
 },1200);
 }
 
 if(m.msg_type==='tick'&&m.tick){
-
 const t=m.tick;
-const sym=t.symbol;
+const sym=t.symbol||t.underlying_symbol;
 const epoch=Number(t.epoch);
 const price=Number(t.quote);
 
 if(!Number.isFinite(epoch)||!Number.isFinite(price))return;
 
 const arr=ticks.get(sym)||[];
-
 arr.push({time:epoch,price});
 
 const cutoff=epoch-3*86400;
