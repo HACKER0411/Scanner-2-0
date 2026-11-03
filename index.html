@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101827"><title>Scanner 2.0 — Four-Stick</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#e8eef9;font:14px system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:17px;background:#101827;border-bottom:1px solid #29364a}h1{font-size:20px;margin:0 0 5px}.muted{color:#a7b5ca;font-size:12px}
+main{padding:13px;max-width:1050px;margin:auto}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.card{background:#121d2d;border:1px solid #29364a;border-radius:12px;padding:12px;margin-bottom:12px}.label{font-size:11px;color:#a7b5ca}.num{font-size:19px;font-weight:700;margin-top:3px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}input,select,button{background:#0b1220;color:#e8eef9;border:1px solid #40516b;border-radius:8px;padding:10px;min-height:40px}input{flex:1;min-width:130px}button{cursor:pointer}.primary{background:#1d4ed8;border-color:#1d4ed8}.danger{border-color:#9f1239}
+table{border-collapse:collapse;width:100%;font-size:12px;min-width:650px}td,th{text-align:left;padding:9px 6px;border-bottom:1px solid #29364a;white-space:nowrap}.buy{color:#4ade80;font-weight:800}.sell{color:#fb7185;font-weight:800}
+.notice{color:#f4d38a;font-size:12px;line-height:1.55}.good{color:#4ade80}.bad{color:#fb7185}.pill{display:inline-block;border:1px solid #40516b;border-radius:99px;padding:3px 8px;font-size:11px}
+@media(max-width:520px){.num{font-size:16px}.card{padding:10px}.controls>*{flex:1}}
+</style></head><body>
+<header><h1>Scanner 2.0</h1><div class="muted">Four-stick pattern scanner · Deriv public market feed · manual trading only</div></header>
+<main>
+<div class="grid">
+ <div class="card"><div class="label">Feed status</div><div class="num" id="conn">Stopped</div></div>
+ <div class="card"><div class="label">Subscribed instruments</div><div class="num" id="symbols">0</div></div>
+ <div class="card"><div class="label">Signals shown</div><div class="num" id="count">0</div></div>
+</div>
+<div class="card">
+ <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap"><b>Market scanner</b><span class="pill" id="runtime">Runs only while this page is active</span></div>
+ <div class="controls">
+  <button class="primary" id="start">Start scanning</button><button id="stop" class="danger" disabled>Stop</button>
+  <input id="search" placeholder="Filter instrument">
+  <select id="tf"><option value="">All timeframes</option></select>
+  <select id="side"><option value="">BUY + SELL</option><option>BUY</option><option>SELL</option></select>
+ </div>
+ <div class="muted" id="status">Press Start scanning to connect to Deriv.</div>
+ <div style="overflow-x:auto;margin-top:10px"><table><thead><tr><th>Instrument</th><th>Timeframe</th><th>Signal</th><th>Entry trigger</th><th>Stop reference</th><th>Time (local)</th></tr></thead><tbody id="rows"><tr><td colspan="6">No signals yet.</td></tr></tbody></table></div>
+</div>
+<div class="card">
+ <b>Signal rules</b>
+ <p class="muted">BUY: lower wick &gt; upper wick, then upper &gt; lower, then lower &gt; upper. Trigger: live price crosses above candle 3 high. Stop reference: candle 1 low.</p>
+ <p class="muted">SELL: upper wick &gt; lower wick, then lower &gt; upper, then upper &gt; lower. Trigger: live price crosses below candle 3 low. Stop reference: candle 1 high.</p>
+ <p class="notice">Important limitations: This browser-only build starts collecting ticks when you press Start. It does not backfill earlier candles, so higher timeframes may take many hours to become eligible (up to 36 hours for H12). Tick-built candles may differ from MT5 candles. Keep Chrome open and in the foreground; Android may pause background tabs. Confirm every setup on MT5. This is experimental and not validated for live trading.</p>
+</div>
+<div class="muted">No orders are placed. No Deriv password or API token is requested. Signals remain in this page's memory and disappear when the page is reloaded.</div>
+</main>
+<script>
+(()=>{
+'use strict';
+const ENDPOINT='wss://api.derivws.com/trading/v1/options/ws/public';
+const TF=[60,120,180,240,300,360,600,720,900,1200,1800,3600,7200,10800,14400,21600,28800,43200];
+const LABEL={60:'M1',120:'M2',180:'M3',240:'M4',300:'M5',360:'M6',600:'M10',720:'M12',900:'M15',1200:'M20',1800:'M30',3600:'H1',7200:'H2',10800:'H3',14400:'H4',21600:'H6',28800:'H8',43200:'H12'};
+const $=id=>document.getElementById(id);
+TF.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=LABEL[s];$('tf').appendChild(o)});
+let ws=null,running=false,symbols=[],ticks=new Map(),signals=[],seen=new Set(),previous=new Map(),subscribeTimer=null,lastTick=0;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=n=>Number(n).toLocaleString(undefined,{maximumFractionDigits:8});
+function setStatus(s){$('status').textContent=s}
+function candleBars(arr,sec,now){
+ const map=new Map();
+ for(const t of arr){const k=Math.floor(t.time/sec)*sec;let b=map.get(k);if(!b)map.set(k,b={time:k,open:t.price,high:t.price,low:t.price,close:t.price});else{b.high=Math.max(b.high,t.price);b.low=Math.min(b.low,t.price);b.close=t.price}}
+ return [...map.values()].filter(b=>b.time+sec<=now).sort((a,b)=>a.time-b.time);
+}
+function lower(b){return Math.min(b.open,b.close)-b.low}
+function upper(b){return b.high-Math.max(b.open,b.close)}
+function evaluate(sym,price,epoch){
+ const arr=ticks.get(sym);if(!arr||arr.length<2)return;
+ for(const sec of TF){
+  const bars=candleBars(arr,sec,epoch);if(bars.length<3)continue;
+  const a=bars[bars.length-3],b=bars[bars.length-2],c=bars[bars.length-1];
+  // Require the live tick to belong to the fourth candle, after candle 3 closed.
+  if(Math.floor(epoch/sec)*sec<c.time+sec)continue;
+  let direction=null,level,stop;
+  if(lower(a)>upper(a)&&upper(b)>lower(b)&&lower(c)>upper(c)){direction='BUY';level=c.high;stop=a.low}
+  else if(upper(a)>lower(a)&&lower(b)>upper(b)&&upper(c)>lower(c)){direction='SELL';level=c.low;stop=a.high}
+  if(!direction)continue;
+  const key=[sym,sec,direction,c.time].join('|');if(seen.has(key))continue;
+  const prev=previous.get(sym);
+  const crossed=direction==='BUY'?(prev!==undefined&&prev<=level&&price>level):(prev!==undefined&&prev>=level&&price<level);
+  if(crossed){
+   seen.add(key);
+   const info=symbols.find(x=>x.symbol===sym);
+   signals.unshift({id:key,symbol:sym,name:info?.display_name||sym,tf:LABEL[sec],direction,entry:price,stop,time:epoch});
+   if(signals.length>500)signals.length=500;
+  }
+ }
+}
+function render(){
+ const q=$('search').value.toLowerCase(),tf=$('tf').value,side=$('side').value;
+ const list=signals.filter(x=>(x.name+' '+x.symbol).toLowerCase().includes(q)&&(!tf||String(TF.find(s=>LABEL[s]===x.tf))===tf)&&(!side||x.direction===side));
+ $('count').textContent=list.length;
+ $('rows').innerHTML=list.length?list.map(x=>`<tr><td>${esc(x.name)}</td><td>${x.tf}</td><td class="${x.direction.toLowerCase()}">${x.direction}</td><td>${fmt(x.entry)}</td><td>${fmt(x.stop)}</td><td>${new Date(x.time*1000).toLocaleString()}</td></tr>`).join(''):'<tr><td colspan="6">No matching signals yet.</td></tr>';
+}
+['search','tf','side'].forEach(id=>$(id).addEventListener('input',render));
+function closeFeed(){if(subscribeTimer)clearInterval(subscribeTimer);subscribeTimer=null;if(ws){try{ws.close()}catch{}ws=null}running=false;$('conn').textContent='Stopped';$('start').disabled=false;$('stop').disabled=true}
+function start(){
+ if(running)return;running=true;$('conn').textContent='Connecting';$('start').disabled=true;$('stop').disabled=false;
+ ticks.clear();previous.clear();signals=[];seen.clear();symbols=[];render();setStatus('Connecting to Deriv public market feed…');
+ try{ws=new WebSocket(ENDPOINT)}catch(e){setStatus('Could not open WebSocket: '+e.message);closeFeed();return}
+ ws.onopen=()=>{if(!running)return;$('conn').textContent='Connected';setStatus('Connected. Requesting active instruments…');ws.send(JSON.stringify({active_symbols:'brief',req_id:1}))};
+ ws.onmessage=ev=>{
+  let m;try{m=JSON.parse(ev.data)}catch{return}
+  if(m.error){setStatus('Deriv feed error: '+(m.error.message||'Unknown error'));return}
+  if(m.msg_type==='active_symbols'){
+   symbols=(m.active_symbols||[]).filter(x=>x.symbol);
+   $('symbols').textContent=symbols.length;
+   if(!symbols.length){setStatus('No active instruments were returned.');return}
+   let index=0;
+   // Spread subscriptions to avoid sending a large burst on mobile.
+   subscribeTimer=setInterval(()=>{
+    if(!running||!ws||ws.readyState!==1){clearInterval(subscribeTimer);return}
+    const batch=symbols.slice(index,index+5);
+    batch.forEach(s=>ws.send(JSON.stringify({ticks:s.symbol,subscribe:1})));
+    index+=5;
+    setStatus(`Subscribing to instruments: ${Math.min(index,symbols.length)} / ${symbols.length}. Keep this page open.`);
+    if(index>=symbols.length){clearInterval(subscribeTimer);subscribeTimer=null;setStatus(`Subscribed to ${symbols.length} instruments. Collecting ticks; candles build from now onward.`)}
+   },1200);
+  }
+  if(m.msg_type==='tick'&&m.tick){
+   const t=m.tick,sym=t.symbol,epoch=Number(t.epoch),price=Number(t.quote);
+   if(!Number.isFinite(epoch)||!Number.isFinite(price))return;
+   const arr=ticks.get(sym)||[];arr.push({time:epoch,price});
+   const cutoff=epoch-3*86400;while(arr.length&&arr[0].time<cutoff)arr.shift();ticks.set(sym,arr);
+   evaluate(sym,price,epoch);previous.set(sym,price);lastTick=Date.now();
+   if(signals.length)render();
+   if($('conn').textContent!=='Connected')$('conn').textContent='Connected';
+   if(Date.now()%4<2)setStatus(`Receiving live ticks. Last update: ${new Date(epoch*1000).toLocaleTimeString()}.`);
+  }
+ };
+ ws.onerror=()=>{setStatus('WebSocket error. Check connection and try again.');$('conn').textContent='Error'};
+ ws.onclose=()=>{if(running){setStatus('Connection closed. Press Start scanning to reconnect.');closeFeed()}};
+}
+$('start').onclick=start;$('stop').onclick=()=>{closeFeed();setStatus('Scanning stopped. Press Start scanning to resume.')};
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)setStatus('Chrome is in the background. Android may pause scanning; keep this tab open and active for best results.')});
+window.addEventListener('beforeunload',()=>{if(ws)ws.close()});
+})();
+</script></body></html>
